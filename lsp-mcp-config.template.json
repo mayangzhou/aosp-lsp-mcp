@@ -1,0 +1,29 @@
+{
+  "includeDefaultServers": true,
+  "servers": {
+    "typescript": {
+      "command": ["typescript-language-server", "--stdio"],
+      "extensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
+      "initialization": {
+        "preferences": {
+          "importModuleSpecifierPreference": "relative"
+        }
+      }
+    },
+    "python": {
+      "command": ["pyright-langserver", "--stdio"],
+      "extensions": [".py", ".pyi"],
+      "initialization": {}
+    },
+    "rust": {
+      "command": ["rust-analyzer"],
+      "extensions": [".rs"],
+      "initialization": {}
+    },
+    "go": {
+      "command": ["gopls"],
+      "extensions": [".go"],
+      "initialization": {}
+    }
+  }
+}

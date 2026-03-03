@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "lsp-aosp": {
+      "command": "node",
+      "args": [
+        "D:/Codes/claude-work/lsp-mcp-server/dist/index.js"
+      ],
+      "env": {
+        "WORKSPACE_ROOT": "D:/AOSP",
+        "LSP_MCP_CONFIG": "D:/AOSP/lsp-mcp-config.json"
+      }
+    }
+  }
+}

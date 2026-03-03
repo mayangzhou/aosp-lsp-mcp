@@ -1,0 +1,39 @@
+{
+  "name": "lsp-mcp-server",
+  "version": "1.1.0",
+  "description": "MCP server that provides Language Server Protocol integration",
+  "type": "module",
+  "main": "dist/api.js",
+  "exports": {
+    ".": {
+      "types": "./dist/api.d.ts",
+      "import": "./dist/api.js"
+    },
+    "./cli": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "lsp-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "keywords": ["mcp", "lsp", "language-server", "code-intelligence"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "vscode-jsonrpc": "^8.2.0",
+    "vscode-languageserver-types": "^3.17.5",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  }
+}

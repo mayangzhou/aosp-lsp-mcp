@@ -1,0 +1,20 @@
+{
+  "includeDefaultServers": false,
+  "servers": {
+    "clangd": {
+      "command": ["clangd", "--background-index", "--header-insertion=never"],
+      "extensions": [".c", ".cc", ".cpp", ".h", ".hpp", ".hh", ".mm"],
+      "initialization": {}
+    },
+    "rust": {
+      "command": ["rust-analyzer"],
+      "extensions": [".rs"],
+      "initialization": {}
+    },
+    "python": {
+      "command": ["pyright-langserver", "--stdio"],
+      "extensions": [".py"],
+      "initialization": {}
+    }
+  }
+}

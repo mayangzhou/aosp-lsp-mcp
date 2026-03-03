@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "lsp": {
+      "command": "node",
+      "args": [
+        "D:/Codes/claude-work/lsp-mcp-server/dist/index.js"
+      ],
+      "env": {
+        "WORKSPACE_ROOT": "D:/Codes/claude-work",
+        "LSP_MCP_CONFIG": "D:/Codes/claude-work/lsp-mcp-config.json"
+      }
+    }
+  }
+}
