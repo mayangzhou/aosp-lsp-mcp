@@ -56,7 +56,7 @@ export async function createLspMcpServer(options: CreateLspMcpServerOptions = {}
         result = await executeLspTool(lspManager, input);
       } else if (request.params.name === "aosp") {
         const input = AospToolSchema.parse(request.params.arguments);
-        result = await executeAospTool({ workspaceRoot }, input);
+        result = await executeAospTool({ workspaceRoot, lspManager }, input);
       } else {
         throw new Error(`Unknown tool: ${request.params.name}`);
       }

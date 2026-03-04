@@ -1,4 +1,4 @@
 interface:
   display_name: "AOSP MCP Workflow"
   short_description: "AOSP MCP初始化、预设索引与日常检索流程"
-  default_prompt: "Use $aosp-mcp-workflow to initialize and run AOSP MCP preset indexing and daily queries."
+  default_prompt: "使用 $aosp-mcp-workflow 完成 AOSP MCP 初始化、索引构建与日常检索。"

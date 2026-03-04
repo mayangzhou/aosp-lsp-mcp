@@ -2,12 +2,15 @@ import { promisify } from "util";
 import { execFile } from "child_process";
 import path from "path";
 import fs from "fs/promises";
+import { fileURLToPath } from "url";
 import { z } from "zod";
+import type { LSPManager } from "../lsp/index.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_LIMIT = 30;
 const INDEX_DIR_NAME = ".lsp-mcp-aosp-index";
 const DEFAULT_PRESET_MAX_MODULES = 80;
+const DEFAULT_DOMAIN_MAX_WARM_MODULES = 80;
 
 const DEFAULT_EXCLUDES = [
   "!out/**",
@@ -38,6 +41,43 @@ type AospPreset = {
   description: string;
   repos: string[];
   moduleKeywords: string[];
+};
+
+type AospDomainKey = "audio" | "video" | "render";
+type AospDomainProfile = {
+  id: AospDomainKey;
+  title: string;
+  description: string;
+  repos: string[];
+  hotModules: string[];
+  warmModuleKeywords: string[];
+};
+
+const AOSP_DOMAINS: Record<AospDomainKey, AospDomainProfile> = {
+  audio: {
+    id: "audio",
+    title: "Audio",
+    description: "Audio and media pipeline with semantic priority on common audio modules.",
+    repos: ["frameworks/av", "frameworks/base/media", "system/media", "hardware/interfaces"],
+    hotModules: ["libaudioclient", "libaudiohal", "audioserver", "services.core"],
+    warmModuleKeywords: ["audio", "media", "aaudio", "audiopolicy", "audioserver", "codec"],
+  },
+  video: {
+    id: "video",
+    title: "Video",
+    description: "Video codec, stagefright and media stack repositories.",
+    repos: ["frameworks/av", "frameworks/base/media", "packages/modules/Media", "hardware/interfaces"],
+    hotModules: ["libstagefright", "libmediaplayerservice", "mediaswcodec", "mediaextractor"],
+    warmModuleKeywords: ["video", "stagefright", "codec", "media", "extractor", "decoder", "encoder"],
+  },
+  render: {
+    id: "render",
+    title: "Render",
+    description: "SurfaceFlinger, HWUI, graphics and render pipeline.",
+    repos: ["frameworks/native", "frameworks/base/libs/hwui", "hardware/interfaces/graphics", "system/core"],
+    hotModules: ["surfaceflinger", "libgui", "libhwui", "libsurfaceflinger"],
+    warmModuleKeywords: ["render", "surface", "composer", "hwui", "vulkan", "egl", "gralloc", "gpu"],
+  },
 };
 
 const AOSP_PRESETS: Record<AospPresetKey, AospPreset> = {
@@ -86,6 +126,11 @@ const AOSP_PRESETS: Record<AospPresetKey, AospPreset> = {
 
 export const AOSP_OPERATIONS = [
   "detectRoot",
+  "init",
+  "search",
+  "listDomains",
+  "indexDomain",
+  "queryDomain",
   "listPresets",
   "resolveModule",
   "indexModule",
@@ -118,6 +163,38 @@ export const AospToolSchema = z.discriminatedUnion("operation", [
   z.object({
     operation: z.literal("detectRoot"),
     hintPath: z.string().optional().describe("Optional path to start detection from"),
+  }),
+  z.object({
+    operation: z.literal("init"),
+    domain: z.enum(["audio", "video", "render"]).optional(),
+    focusPath: z.string().optional().describe("Optional path hint to infer domain"),
+    maxWarmModules: z.number().int().min(1).max(400).default(DEFAULT_DOMAIN_MAX_WARM_MODULES),
+  }),
+  z.object({
+    operation: z.literal("search"),
+    query: z.string().min(1),
+    domain: z.enum(["audio", "video", "render"]).optional(),
+    queryType: z.enum(["auto", "symbol", "class", "path"]).default("auto"),
+    allowRemote: z.boolean().default(false),
+    limit: z.number().int().min(1).max(200).default(DEFAULT_LIMIT),
+  }),
+  z.object({
+    operation: z.literal("listDomains"),
+  }),
+  z.object({
+    operation: z.literal("indexDomain"),
+    domain: z.enum(["audio", "video", "render"]),
+    maxWarmModules: z.number().int().min(1).max(400).default(DEFAULT_DOMAIN_MAX_WARM_MODULES),
+  }),
+  z.object({
+    operation: z.literal("queryDomain"),
+    domain: z.enum(["audio", "video", "render"]),
+    query: z.string().min(1).describe("Search query"),
+    queryType: z.enum(["symbol", "class", "path"]).default("symbol"),
+    mode: z.enum(["auto", "semantic", "file", "remote"]).default("auto"),
+    literal: z.boolean().default(true),
+    allowRemote: z.boolean().default(false),
+    limit: z.number().int().min(1).max(200).default(DEFAULT_LIMIT),
   }),
   z.object({
     operation: z.literal("listPresets"),
@@ -184,6 +261,7 @@ export type AospToolInput = z.infer<typeof AospToolSchema>;
 
 interface AospToolContext {
   workspaceRoot: string;
+  lspManager?: LSPManager;
 }
 
 type ModuleInfoEntry = {
@@ -207,6 +285,24 @@ type PresetIndexShard = {
   root: string;
   repos: string[];
   modules: string[];
+  createdAt: string;
+};
+
+type DomainIndexedModule = {
+  moduleName: string;
+  fileCount: number;
+  searchRoots: string[];
+};
+
+type DomainIndexShard = {
+  version: 1;
+  domain: AospDomainKey;
+  root: string;
+  repos: string[];
+  hotModules: DomainIndexedModule[];
+  warmModules: DomainIndexedModule[];
+  moduleInfoPath: string | null;
+  moduleInfoMtimeMs: number | null;
   createdAt: string;
 };
 
@@ -382,6 +478,10 @@ function presetIndexDir(root: string): string {
   return path.join(root, INDEX_DIR_NAME, "presets");
 }
 
+function domainIndexDir(root: string): string {
+  return path.join(root, INDEX_DIR_NAME, "domains");
+}
+
 function moduleShardPath(root: string, moduleName: string): string {
   const safe = moduleName.replace(/[^a-zA-Z0-9._-]/g, "_");
   return path.join(moduleIndexDir(root), `${safe}.json`);
@@ -389,6 +489,10 @@ function moduleShardPath(root: string, moduleName: string): string {
 
 function presetShardPath(root: string, preset: AospPresetKey): string {
   return path.join(presetIndexDir(root), `${preset}.json`);
+}
+
+function domainShardPath(root: string, domain: AospDomainKey): string {
+  return path.join(domainIndexDir(root), `${domain}.json`);
 }
 
 async function writeModuleShard(root: string, shard: ModuleIndexShard): Promise<string> {
@@ -403,6 +507,14 @@ async function writePresetShard(root: string, shard: PresetIndexShard): Promise<
   const dir = presetIndexDir(root);
   await fs.mkdir(dir, { recursive: true });
   const target = presetShardPath(root, shard.preset);
+  await fs.writeFile(target, JSON.stringify(shard, null, 2), "utf-8");
+  return target;
+}
+
+async function writeDomainShard(root: string, shard: DomainIndexShard): Promise<string> {
+  const dir = domainIndexDir(root);
+  await fs.mkdir(dir, { recursive: true });
+  const target = domainShardPath(root, shard.domain);
   await fs.writeFile(target, JSON.stringify(shard, null, 2), "utf-8");
   return target;
 }
@@ -427,6 +539,19 @@ async function readPresetShard(root: string, preset: AospPresetKey): Promise<Pre
     const content = await fs.readFile(target, "utf-8");
     const parsed = JSON.parse(content) as PresetIndexShard;
     if (parsed.version !== 1 || !Array.isArray(parsed.modules)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function readDomainShard(root: string, domain: AospDomainKey): Promise<DomainIndexShard | null> {
+  const target = domainShardPath(root, domain);
+  if (!(await pathExists(target))) return null;
+  try {
+    const content = await fs.readFile(target, "utf-8");
+    const parsed = JSON.parse(content) as DomainIndexShard;
+    if (parsed.version !== 1 || !Array.isArray(parsed.hotModules) || !Array.isArray(parsed.warmModules)) return null;
     return parsed;
   } catch {
     return null;
@@ -496,6 +621,196 @@ function discoverModulesForPreset(
 
   scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
   return scored.slice(0, maxModules).map((item) => item.name);
+}
+
+function discoverWarmModulesForDomain(
+  moduleInfo: ModuleInfoMap | null,
+  domain: AospDomainProfile,
+  maxModules: number
+): string[] {
+  if (!moduleInfo) return [];
+
+  const repoPrefixes = domain.repos.map((repo) => validateRepo(repo));
+  const keywords = domain.warmModuleKeywords.map((item) => item.toLowerCase());
+  const hotSet = new Set(domain.hotModules);
+  const scored: Array<{ name: string; score: number }> = [];
+
+  for (const [moduleName, entry] of Object.entries(moduleInfo)) {
+    if (hotSet.has(moduleName)) continue;
+    const paths = (entry.path ?? []).map((item) => toPosixPath(item));
+    const lowerName = moduleName.toLowerCase();
+    const repoHit = paths.some((item) => repoPrefixes.some((repo) => item === repo || item.startsWith(`${repo}/`)));
+    const keywordHit = keywords.some((keyword) => lowerName.includes(keyword));
+    if (!repoHit && !keywordHit) continue;
+
+    let score = 0;
+    if (repoHit) score += 2;
+    if (keywordHit) score += 1;
+    scored.push({ name: moduleName, score });
+  }
+
+  scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  return scored.slice(0, maxModules).map((item) => item.name);
+}
+
+function isPathUnderRoots(target: string, roots: string[]): boolean {
+  const normalizedTarget = toPosixPath(path.resolve(target)).toLowerCase();
+  return roots.some((root) => {
+    const normalizedRoot = toPosixPath(path.resolve(root)).toLowerCase().replace(/\/+$/, "");
+    return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(`${normalizedRoot}/`);
+  });
+}
+
+function toAbsoluteFromUri(uri: string): string | null {
+  if (!uri.startsWith("file://")) return null;
+  try {
+    return fileURLToPath(uri);
+  } catch {
+    return null;
+  }
+}
+
+function inferConfidence(name: string, query: string, tier: "semantic" | "file" | "remote"): number {
+  const left = name.toLowerCase();
+  const right = query.toLowerCase();
+  if (left === right) return tier === "semantic" ? 1 : tier === "file" ? 0.92 : 0.65;
+  if (left.includes(right)) return tier === "semantic" ? 0.95 : tier === "file" ? 0.85 : 0.6;
+  return tier === "semantic" ? 0.88 : tier === "file" ? 0.75 : 0.5;
+}
+
+async function querySemanticInDomain(input: {
+  lspManager: LSPManager | undefined;
+  allowedRoots: string[];
+  query: string;
+  limit: number;
+}) {
+  if (!input.lspManager) return [];
+
+  const symbols = (await input.lspManager.workspaceSymbol(input.query).catch(() => [])) as Array<Record<string, any>>;
+  const results: Array<Record<string, any>> = [];
+
+  for (const symbol of symbols) {
+    const uri = (symbol.location?.uri as string | undefined) ?? (symbol.uri as string | undefined);
+    if (!uri) continue;
+    const absolutePath = toAbsoluteFromUri(uri);
+    if (!absolutePath) continue;
+    if (!isPathUnderRoots(absolutePath, input.allowedRoots)) continue;
+
+    const start = (symbol.location?.range?.start as { line?: number; character?: number } | undefined) ?? {};
+    const name = typeof symbol.name === "string" ? symbol.name : "";
+
+    results.push({
+      tier: "semantic",
+      source: "lsp",
+      confidence: inferConfidence(name || input.query, input.query, "semantic"),
+      name,
+      kind: symbol.kind ?? null,
+      containerName: symbol.containerName ?? null,
+      absolutePath: toPosixPath(absolutePath),
+      relativePath: "",
+      line: Number.isFinite(start.line) ? Number(start.line) + 1 : 1,
+      character: Number.isFinite(start.character) ? Number(start.character) + 1 : 1,
+    });
+    if (results.length >= input.limit) break;
+  }
+
+  return results;
+}
+
+function buildRemoteCandidates(query: string, queryType: "symbol" | "class" | "path", limit: number) {
+  const encoded = encodeURIComponent(query);
+  const token = queryType === "path" ? "path" : "symbol";
+  return [
+    {
+      tier: "remote",
+      source: "opengrok",
+      confidence: inferConfidence(query, query, "remote"),
+      title: "OpenGrok candidate",
+      url: `https://opengrok.example.com/search?q=${encoded}&defs=${token}`,
+      note: "Template URL; replace host with your internal OpenGrok service.",
+    },
+    {
+      tier: "remote",
+      source: "cs.android.com",
+      confidence: inferConfidence(query, query, "remote"),
+      title: "cs.android.com candidate",
+      url: `https://cs.android.com/search?q=${encoded}`,
+      note: "Remote reference result, verify with local branch before changes.",
+    },
+  ].slice(0, Math.max(1, Math.min(limit, 2)));
+}
+
+async function getFileMtimeMs(filePath: string | null): Promise<number | null> {
+  if (!filePath) return null;
+  try {
+    const stat = await fs.stat(filePath);
+    return Number(stat.mtimeMs);
+  } catch {
+    return null;
+  }
+}
+
+function inferQueryType(query: string): "symbol" | "class" | "path" {
+  if (/[\\/]/.test(query) || /\.[a-z0-9]{1,8}$/i.test(query)) return "path";
+  if (/^[A-Z][A-Za-z0-9_]*$/.test(query)) return "class";
+  return "symbol";
+}
+
+function scoreDomainByPathHint(domain: AospDomainProfile, focusPath: string): number {
+  const normalized = toPosixPath(focusPath).toLowerCase();
+  let score = 0;
+  for (const repo of domain.repos) {
+    const repoLower = repo.toLowerCase();
+    if (normalized === repoLower || normalized.startsWith(`${repoLower}/`)) score += 3;
+  }
+  for (const keyword of domain.warmModuleKeywords) {
+    if (normalized.includes(keyword.toLowerCase())) score += 1;
+  }
+  return score;
+}
+
+function scoreDomainByModuleInfo(domain: AospDomainProfile, moduleInfo: ModuleInfoMap | null): number {
+  if (!moduleInfo) return 0;
+  let score = 0;
+  for (const moduleName of domain.hotModules) {
+    if (moduleInfo[moduleName]) score += 3;
+  }
+  const keywords = domain.warmModuleKeywords.map((x) => x.toLowerCase());
+  for (const key of Object.keys(moduleInfo)) {
+    const lower = key.toLowerCase();
+    if (keywords.some((k) => lower.includes(k))) score += 1;
+  }
+  return score;
+}
+
+function inferDomain(input: {
+  requestedDomain?: AospDomainKey;
+  focusPath?: string;
+  moduleInfo: ModuleInfoMap | null;
+}): { domain: AospDomainKey; reason: string; scores: Record<AospDomainKey, number> } {
+  if (input.requestedDomain) {
+    return {
+      domain: input.requestedDomain,
+      reason: "explicit",
+      scores: { audio: 0, video: 0, render: 0 },
+    };
+  }
+
+  const domains = Object.values(AOSP_DOMAINS);
+  const scores: Record<AospDomainKey, number> = { audio: 0, video: 0, render: 0 };
+  for (const domain of domains) {
+    scores[domain.id] += scoreDomainByModuleInfo(domain, input.moduleInfo);
+    if (input.focusPath) scores[domain.id] += scoreDomainByPathHint(domain, input.focusPath);
+  }
+
+  const ranked = domains
+    .map((domain) => ({ id: domain.id, score: scores[domain.id] }))
+    .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  return {
+    domain: ranked[0]?.id ?? "audio",
+    reason: input.focusPath ? "focusPath+moduleInfo" : "moduleInfo",
+    scores,
+  };
 }
 
 async function resolveSearchRoots(input: {
@@ -634,6 +949,176 @@ async function buildModuleIndexShard(input: {
   return { shard, shardFile };
 }
 
+async function buildDomainIndexShard(input: {
+  root: string;
+  domain: AospDomainKey;
+  maxWarmModules: number;
+  moduleInfo: ModuleInfoMap | null;
+  moduleInfoPath: string | null;
+}) {
+  const profile = AOSP_DOMAINS[input.domain];
+  const hotIndexed: DomainIndexedModule[] = [];
+  const warmIndexed: DomainIndexedModule[] = [];
+
+  for (const moduleName of profile.hotModules) {
+    try {
+      const { shard } = await buildModuleIndexShard({
+        root: input.root,
+        moduleName,
+        moduleInfo: input.moduleInfo,
+        moduleInfoPath: input.moduleInfoPath,
+      });
+      hotIndexed.push({
+        moduleName: shard.moduleName,
+        fileCount: shard.fileCount,
+        searchRoots: shard.searchRoots,
+      });
+    } catch {
+      // Skip unavailable modules in current branch/product.
+    }
+  }
+
+  const warmModules = discoverWarmModulesForDomain(input.moduleInfo, profile, input.maxWarmModules);
+  for (const moduleName of warmModules) {
+    try {
+      const { shard } = await buildModuleIndexShard({
+        root: input.root,
+        moduleName,
+        moduleInfo: input.moduleInfo,
+        moduleInfoPath: input.moduleInfoPath,
+      });
+      warmIndexed.push({
+        moduleName: shard.moduleName,
+        fileCount: shard.fileCount,
+        searchRoots: shard.searchRoots,
+      });
+    } catch {
+      // Skip stale module-info entries.
+    }
+  }
+
+  const repos = profile.repos
+    .map((repo) => validateRepo(repo))
+    .filter((repo, index, arr) => arr.indexOf(repo) === index);
+  const moduleInfoMtimeMs = await getFileMtimeMs(input.moduleInfoPath);
+
+  const shard: DomainIndexShard = {
+    version: 1,
+    domain: input.domain,
+    root: toPosixPath(input.root),
+    repos,
+    hotModules: hotIndexed,
+    warmModules: warmIndexed,
+    moduleInfoPath: input.moduleInfoPath ? toPosixPath(input.moduleInfoPath) : null,
+    moduleInfoMtimeMs,
+    createdAt: new Date().toISOString(),
+  };
+  const shardFile = await writeDomainShard(input.root, shard);
+  return { shard, shardFile };
+}
+
+async function runDomainQuery(input: {
+  root: string;
+  shard: DomainIndexShard;
+  query: string;
+  queryType: "symbol" | "class" | "path";
+  mode: "auto" | "semantic" | "file" | "remote";
+  allowRemote: boolean;
+  limit: number;
+  literal: boolean;
+  lspManager?: LSPManager;
+}) {
+  const hotRoots = Array.from(new Set(input.shard.hotModules.flatMap((item) => item.searchRoots))).map((x) =>
+    path.resolve(x)
+  );
+  const warmRoots = Array.from(new Set(input.shard.warmModules.flatMap((item) => item.searchRoots))).map((x) =>
+    path.resolve(x)
+  );
+  const repoRoots = (
+    await Promise.all(
+      input.shard.repos.map(async (repo) => {
+        const value = path.join(input.root, repo);
+        return (await pathExists(value)) ? path.resolve(value) : null;
+      })
+    )
+  ).filter((item): item is string => item !== null);
+
+  const fileRoots = Array.from(new Set([...hotRoots, ...warmRoots, ...repoRoots]));
+  const allowSemantic = (input.mode === "auto" || input.mode === "semantic") && input.queryType !== "path";
+  const allowFile = input.mode === "auto" || input.mode === "file";
+  const allowRemote = input.mode === "remote" || (input.mode === "auto" && input.allowRemote);
+
+  const semanticResults = allowSemantic
+    ? await querySemanticInDomain({
+        lspManager: input.lspManager,
+        allowedRoots: hotRoots,
+        query: input.query,
+        limit: input.limit,
+      })
+    : [];
+  const semanticNormalized = semanticResults.map((item) => ({
+    ...item,
+    relativePath: formatRelative(input.root, item.absolutePath as string),
+  }));
+
+  let fileResults: Array<Record<string, any>> = [];
+  if (allowFile && semanticNormalized.length < Math.min(5, input.limit)) {
+    if (input.queryType === "path") {
+      const matches = await findPathInRoots(input.root, fileRoots, input.query, input.limit);
+      fileResults = matches.map((item) => ({
+        tier: "file",
+        source: "rg",
+        confidence: inferConfidence(item.relativePath, input.query, "file"),
+        ...item,
+      }));
+    } else if (input.queryType === "class") {
+      const pattern = `(class|interface|enum|struct)\\s+${input.query}\\b`;
+      const matches = await grepInRoots({
+        root: input.root,
+        roots: fileRoots,
+        pattern,
+        limit: input.limit,
+        literal: false,
+        fileGlobs: ["*.java", "*.kt", "*.aidl", "*.cc", "*.cpp", "*.h", "*.hpp"],
+      });
+      fileResults = matches.map((item) => ({
+        tier: "file",
+        source: "rg",
+        confidence: inferConfidence(String(item.match ?? input.query), input.query, "file"),
+        ...item,
+      }));
+    } else {
+      const matches = await grepInRoots({
+        root: input.root,
+        roots: fileRoots,
+        pattern: input.query,
+        limit: input.limit,
+        literal: input.literal,
+      });
+      fileResults = matches.map((item) => ({
+        tier: "file",
+        source: "rg",
+        confidence: inferConfidence(String(item.match ?? input.query), input.query, "file"),
+        ...item,
+      }));
+    }
+  }
+
+  const remoteResults = allowRemote ? buildRemoteCandidates(input.query, input.queryType, input.limit) : [];
+  const preferredTier =
+    semanticNormalized.length > 0 ? "semantic" : fileResults.length > 0 ? "file" : remoteResults.length > 0 ? "remote" : "none";
+
+  return {
+    preferredTier,
+    coverage: {
+      hotModules: input.shard.hotModules.length,
+      warmModules: input.shard.warmModules.length,
+      repos: input.shard.repos,
+    },
+    results: [...semanticNormalized, ...fileResults, ...remoteResults].slice(0, input.limit),
+  };
+}
+
 export async function executeAospTool(context: AospToolContext, input: AospToolInput): Promise<Record<string, any>> {
   const detected = await detectAospRoot(context.workspaceRoot);
   const root = detected.root;
@@ -655,6 +1140,18 @@ export async function executeAospTool(context: AospToolContext, input: AospToolI
     );
   }
 
+  const compileCommandsCandidates = [
+    path.join(root, "compile_commands.json"),
+    path.join(root, "out/soong/compile_commands.json"),
+  ];
+
+  if (input.operation === "listDomains") {
+    return {
+      operation: input.operation,
+      domains: Object.values(AOSP_DOMAINS),
+    };
+  }
+
   if (input.operation === "listPresets") {
     return {
       operation: input.operation,
@@ -664,6 +1161,155 @@ export async function executeAospTool(context: AospToolContext, input: AospToolI
 
   const moduleInfoState = await loadModuleInfo(root);
   const moduleInfo = moduleInfoState.data;
+
+  if (input.operation === "init") {
+    const moduleInfoMtimeMs = await getFileMtimeMs(moduleInfoState.path);
+    const compileCommandsFound = (
+      await Promise.all(
+        compileCommandsCandidates.map(async (candidate) => ((await pathExists(candidate)) ? candidate : null))
+      )
+    ).filter((item): item is string => item !== null);
+
+    const inferred = inferDomain({
+      requestedDomain: input.domain,
+      focusPath: input.focusPath,
+      moduleInfo,
+    });
+    const { shard, shardFile } = await buildDomainIndexShard({
+      root,
+      domain: inferred.domain,
+      maxWarmModules: input.maxWarmModules,
+      moduleInfo,
+      moduleInfoPath: moduleInfoState.path,
+    });
+
+    return {
+      operation: input.operation,
+      root: toPosixPath(root),
+      environment: {
+        moduleInfoPath: moduleInfoState.path ? toPosixPath(moduleInfoState.path) : null,
+        moduleInfoReady: Boolean(moduleInfoState.path && moduleInfo),
+        moduleInfoMtimeMs,
+        compileCommandsCandidates: compileCommandsCandidates.map(toPosixPath),
+        compileCommandsPath: compileCommandsFound.length ? toPosixPath(compileCommandsFound[0]) : null,
+        compileCommandsReady: compileCommandsFound.length > 0,
+      },
+      domain: {
+        selected: inferred.domain,
+        reason: inferred.reason,
+        scores: inferred.scores,
+      },
+      index: {
+        shardFile: toPosixPath(shardFile),
+        repos: shard.repos,
+        hotModules: shard.hotModules.length,
+        warmModules: shard.warmModules.length,
+        totalIndexedModules: shard.hotModules.length + shard.warmModules.length,
+      },
+      next: {
+        operation: "search",
+        arguments: {
+          query: "ActivityManagerService",
+          domain: inferred.domain,
+          queryType: "auto",
+          limit: 20,
+        },
+      },
+    };
+  }
+
+  if (input.operation === "search") {
+    const inferred = inferDomain({
+      requestedDomain: input.domain,
+      moduleInfo,
+    });
+    let shard = await readDomainShard(root, inferred.domain);
+    if (!shard) {
+      const built = await buildDomainIndexShard({
+        root,
+        domain: inferred.domain,
+        maxWarmModules: DEFAULT_DOMAIN_MAX_WARM_MODULES,
+        moduleInfo,
+        moduleInfoPath: moduleInfoState.path,
+      });
+      shard = built.shard;
+    }
+
+    const queryType = input.queryType === "auto" ? inferQueryType(input.query) : input.queryType;
+    const domainResult = await runDomainQuery({
+      root,
+      shard,
+      query: input.query,
+      queryType,
+      mode: "auto",
+      allowRemote: input.allowRemote,
+      limit: input.limit,
+      literal: true,
+      lspManager: context.lspManager,
+    });
+    return {
+      operation: input.operation,
+      root: toPosixPath(root),
+      domain: inferred.domain,
+      query: input.query,
+      queryType,
+      preferredTier: domainResult.preferredTier,
+      coverage: domainResult.coverage,
+      results: domainResult.results,
+    };
+  }
+
+  if (input.operation === "indexDomain") {
+    const { shard, shardFile } = await buildDomainIndexShard({
+      root,
+      domain: input.domain,
+      maxWarmModules: input.maxWarmModules,
+      moduleInfo,
+      moduleInfoPath: moduleInfoState.path,
+    });
+    return {
+      operation: input.operation,
+      root: toPosixPath(root),
+      domain: input.domain,
+      shardFile: toPosixPath(shardFile),
+      repos: shard.repos,
+      hotModules: shard.hotModules,
+      warmModules: shard.warmModules,
+      moduleInfoPath: shard.moduleInfoPath,
+      moduleInfoMtimeMs: shard.moduleInfoMtimeMs,
+      totalIndexedModules: shard.hotModules.length + shard.warmModules.length,
+    };
+  }
+
+  if (input.operation === "queryDomain") {
+    const shard = await readDomainShard(root, input.domain);
+    if (!shard) {
+      throw new Error(`Domain "${input.domain}" is not indexed yet. Run indexDomain first.`);
+    }
+    const domainResult = await runDomainQuery({
+      root,
+      shard,
+      query: input.query,
+      queryType: input.queryType,
+      mode: input.mode,
+      allowRemote: input.allowRemote,
+      limit: input.limit,
+      literal: input.literal,
+      lspManager: context.lspManager,
+    });
+
+    return {
+      operation: input.operation,
+      root: toPosixPath(root),
+      domain: input.domain,
+      query: input.query,
+      queryType: input.queryType,
+      mode: input.mode,
+      preferredTier: domainResult.preferredTier,
+      coverage: domainResult.coverage,
+      results: domainResult.results,
+    };
+  }
 
   if (input.operation === "resolveModule") {
     const moduleRoots = getModulePaths(root, moduleInfo, input.moduleName);
@@ -930,6 +1576,11 @@ Design constraints:
 
 Supported operations:
 - detectRoot: Detect AOSP source root by anchor folders (.repo, build/soong, frameworks/base, system/core)
+- init: One-command initialization (artifact checks + domain inference + domain indexing)
+- search: Daily auto search (auto-domain + progressive semantic/file/optional-remote routing)
+- listDomains: List built-in domain profiles (audio/video/render)
+- indexDomain: Build/update domain-local index shards with hot/warm module strategy
+- queryDomain: Progressive query in one domain (semantic -> file -> optional remote)
 - listPresets: List built-in preset profiles
 - resolveModule: Resolve module source paths from module-info.json
 - indexModule: Build/update local partial index shard for one module

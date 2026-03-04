@@ -1,52 +1,57 @@
 ---
 name: aosp-mcp-workflow
-description: Run AOSP-oriented MCP setup and operations with a repeatable workflow. Use when configuring or operating lsp-mcp-server for AOSP, including stdio integration, compile_commands/module-info checks, preset-based indexing (audio/driver/system_server), module indexing, and daily symbol/class/path queries with guardrails.
+description: 使用可复用流程执行 AOSP 场景下的 MCP 初始化与检索操作。适用于配置或日常使用 lsp-mcp-server，包括 stdio 接入、compile_commands/module-info 检查、按领域增量索引（audio/video/render）、按预设索引（audio/driver/system_server）、模块索引，以及带约束的日常符号/类型/路径检索。
 ---
 
-# AOSP MCP Workflow
+# AOSP MCP 工作流
 
-Use this skill when the user needs a practical workflow, not raw API details.
+当用户需要可执行流程而不是底层 API 细节时，使用本技能。
 
-## Execute
+## 执行步骤
 
-1. Verify runtime prerequisites before any query workflow:
-- `WORKSPACE_ROOT` points to AOSP root.
-- `LSP_MCP_CONFIG` points to active config.
-- `module-info.json` exists in build outputs.
-- `compile_commands.json` exists for C/C++ semantic quality.
+1. 在执行任何检索前，先检查运行前提：
+- `WORKSPACE_ROOT` 指向 AOSP 根目录。
+- `LSP_MCP_CONFIG` 指向当前生效配置。
+- 构建产物中存在 `module-info.json`。
+- 存在 `compile_commands.json` 以保证 C/C++ 语义质量。
 
-2. Run guided initialization from [references/init.md](references/init.md) when:
-- First-time setup.
-- Machine path changed.
-- AOSP source synced/rebuilt significantly.
+2. 下面场景需按 [references/init.md](references/init.md) 执行初始化：
+- 首次搭建环境。
+- 机器路径变更。
+- AOSP 源码有较大同步或重编译。
 
-3. Run daily operations from [references/daily-workflow.md](references/daily-workflow.md) when:
-- User asks to locate symbols/classes/modules quickly.
-- User asks for low-latency code search in limited areas.
+3. 下面场景按 [references/daily-workflow.md](references/daily-workflow.md) 执行日常流程：
+- 用户要快速定位符号/类型/模块。
+- 用户要在受限范围内低延迟检索代码。
 
-4. Prefer preset flow when role is obvious:
-- Audio engineer: use `audio` preset.
-- Driver/HAL engineer: use `driver` preset.
-- Framework service engineer: use `system_server` preset.
-- See [references/presets.md](references/presets.md).
+4. 优先使用最简两命令流：
+- 先执行一次 `aosp.init`（产物检查 + 领域推断 + 建索引）。
+- 日常统一使用 `aosp.search`（自动领域 + 递进路由）。
 
-5. Enforce guardrails:
-- Never run unconstrained whole-root text search.
-- Prefer `indexPreset` or `indexModule` before repeated queries.
-- Use `queryPresetSymbol`/`queryIndexedSymbol` for frequent tasks.
+5. 若用户角色明确且需要更大跨仓覆盖，使用预设/领域高级流：
+- 音频工程师：`audio` 预设。
+- 驱动/HAL 工程师：`driver` 预设。
+- Framework 服务工程师：`system_server` 预设。
+- 详见 [references/presets.md](references/presets.md)。
 
-## Output Contract
+6. 严格执行约束策略：
+- 禁止无约束全仓文本扫描。
+- 高频重复检索前优先执行 `indexPreset` 或 `indexModule`。
+- 日常优先 `search`，再按需使用 `queryDomain`/`queryPresetSymbol`/`queryIndexedSymbol`。
 
-When executing this skill, always return:
+## 输出约定
 
-1. Current environment check result (paths + required artifacts).
-2. Exact MCP operations executed (or ready-to-run sequence).
-3. If preset is used: preset name, indexed module count, and follow-up query example.
-4. If blocked: missing artifact + the minimal fix command/path.
+执行本技能时，始终输出：
 
-## References
+1. 当前环境检查结果（路径 + 必需产物）。
+2. 已执行的 MCP 操作（或可直接执行的顺序）。
+3. 若使用 init/search：给出选定领域、索引数量和后续 `search` 示例。
+4. 若使用预设：给出预设名、索引模块数和后续查询示例。
+5. 若被阻塞：给出缺失产物和最小修复命令/路径。
 
-- Initialization checklist and one-time setup: [references/init.md](references/init.md)
-- Day-to-day operation flow: [references/daily-workflow.md](references/daily-workflow.md)
-- Preset catalog and role mapping: [references/presets.md](references/presets.md)
-- Command cookbook and call payloads: [references/examples.md](references/examples.md)
+## 参考文档
+
+- 初始化清单与一次性配置：[references/init.md](references/init.md)
+- 日常操作流程：[references/daily-workflow.md](references/daily-workflow.md)
+- 预设目录与角色映射：[references/presets.md](references/presets.md)
+- 命令示例与调用参数：[references/examples.md](references/examples.md)

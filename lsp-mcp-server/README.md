@@ -119,6 +119,11 @@ const { server, lspManager } = await createLspMcpServer({
 完整实操文档：`docs/AOSP_MCP_使用指南.md`
 
 - `detectRoot`：自动探测 AOSP 根目录（按 `.repo`、`build/soong`、`frameworks/base`、`system/core` 等锚点评分）
+- `init`：一条命令完成环境检查 + domain 推断 + domain 索引初始化（推荐）
+- `search`：日常检索入口（自动 domain + 递进检索，推荐）
+- `listDomains`：列出领域配置（`audio` / `video` / `render`）
+- `indexDomain`：按领域构建索引（`hotModules` 语义优先，`warmModules` 文件索引）
+- `queryDomain`：领域递进查询（`semantic -> file -> optional remote`）
 - `resolveModule`：优先基于 `module-info.json` 解析模块源码路径
 - `indexModule`：为单个模块构建/更新局部索引分片（写入 `.lsp-mcp-aosp-index/modules/*.json`）
 - `listPresets`：列出内置预设（`audio` / `driver` / `system_server`）
@@ -136,13 +141,19 @@ const { server, lspManager } = await createLspMcpServer({
 - 文本检索必须落在 `repo` 或 `scope` 或 `moduleName` 解析后的路径中
 - 默认 `scope=frameworks`（不默认扫 `packages`）
 
+推荐最简工作流：
+
+1. 首次/切分支后执行一次 `init`
+2. 后续统一调用 `search`
+
 示例（MCP 调用参数）：
 
 ```json
 {
   "name": "aosp",
   "arguments": {
-    "operation": "listPresets"
+    "operation": "init",
+    "focusPath": "frameworks/av"
   }
 }
 ```
@@ -151,9 +162,11 @@ const { server, lspManager } = await createLspMcpServer({
 {
   "name": "aosp",
   "arguments": {
-    "operation": "indexPreset",
-    "preset": "audio",
-    "maxModules": 120
+    "operation": "search",
+    "query": "AudioPolicyManager",
+    "queryType": "auto",
+    "allowRemote": false,
+    "limit": 20
   }
 }
 ```
@@ -162,9 +175,12 @@ const { server, lspManager } = await createLspMcpServer({
 {
   "name": "aosp",
   "arguments": {
-    "operation": "queryPresetSymbol",
-    "preset": "audio",
-    "symbol": "AudioPolicyManager",
+    "operation": "queryDomain",
+    "domain": "audio",
+    "query": "AudioPolicyManager",
+    "queryType": "symbol",
+    "mode": "auto",
+    "allowRemote": false,
     "limit": 20
   }
 }
